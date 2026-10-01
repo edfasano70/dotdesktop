@@ -1,0 +1,34 @@
+# AGENTS.md
+
+PyQt6 desktop app that registers downloaded apps in the GNOME/Xfce application menu. UI strings and docs are in Spanish; keep them that way.
+
+## Commands
+
+No virtualenv. Dependencies live in `~/.local` (Debian/Ubuntu need `--break-system-packages`):
+
+```bash
+python3 -m pip install --user --break-system-packages PyQt6 pytest ruff
+python main.py                 # run the app
+pytest                         # full suite (config: testpaths=tests, addopts=-q)
+pytest tests/test_main.py::test_menus   # single test
+ruff check .                   # lint (E,F,I,UP,B; line-length 100, py310)
+ruff format .
+```
+
+No install step needed: run and test from the repo root. Run `ruff check .` before finishing changes.
+
+## Layout / entrypoints
+
+- `main.py` — the whole application: constants, `DARK_STYLE`, `.desktop` launcher logic (`build_desktop_entry`, `create_desktop_entry`, `delete_desktop_entry`, `refresh_desktop_database`), the `launchers.json` registry (`load_registry`/`save_registry`), dialogs (`AboutDialog`, `HelpDialog`, `LauncherDialog`), `LauncherCard`, `MainWindow`, `main()`. `src/` is empty, reserved for future modules.
+- `resources/` — `logo.png` (app + About icon) and `resources/icons/*.svg` (menu icons, referenced by filename via `_icon(name)`).
+- `tests/conftest.py` — sets `QT_QPA_PLATFORM=offscreen`, provides the session-scoped `qapp` fixture, and monkeypatches `main.CONFIG_FILE` to a temp path for test isolation. GUI tests take the `qapp` fixture and construct `MainWindow` directly.
+- `PLANTILLA.md` — the PyQt6 app template these conventions come from; use it when adding new widgets/dialogs.
+
+## Gotchas
+
+- Never build widgets at import time; `import main` must not open a window (tests rely on this).
+- `config.xml` (window geometry + `dark_mode`) lives in `~/.config/dotdesktop/` and is written on `closeEvent`; tests redirect `main.CONFIG_FILE` to a temp path via monkeypatch. The directory is created on save.
+- Launchers are written to `APPLICATIONS_DIR` (`~/.local/share/applications`, module constant so tests monkeypatch it). `create_desktop_entry` raises `ValueError`/`FileExistsError`; the dialog handles overwrite confirmation. Always escape launcher fields via `_escape_desktop_value` / `_escape_exec_arg`.
+- Created launchers are tracked in `REGISTRY_FILE` (`launchers.json`, gitignored, monkeypatched in tests). `load_registry` auto-drops entries whose `.desktop` no longer exists; `MainWindow` renders each entry as a `LauncherCard` and `delete_desktop_entry` removes both file and entry.
+- Menu action icons are loaded from SVG files by name; a missing icon silently yields an empty `QIcon` and breaks `test_menu_actions_have_icons` (which skips separators).
+- This directory is not a git repository — don't assume git commands work.
