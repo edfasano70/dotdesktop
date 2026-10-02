@@ -7,5 +7,4 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
-config.xml
-launchers.json
+packages/

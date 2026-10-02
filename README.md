@@ -25,6 +25,7 @@ Idea y programación: **@Edfasano70**
 - Escapa los campos según la especificación *Desktop Entry*.
 - Refresca el menú con `update-desktop-database` si está disponible.
 - Registra los accesos creados y los muestra como tarjetas en la pantalla principal.
+- Permite editar los accesos creados (renombra el `.desktop` si cambia el nombre).
 - Permite eliminar los accesos creados (borra el `.desktop` y su registro).
 - Tema claro/oscuro y geometría de ventana persistentes.
 
@@ -58,7 +59,7 @@ En la ventana principal, usa **Archivo → Nuevo acceso directo...** (o el botó
 3. **Ícono** (opcional) — PNG o SVG.
 4. **Categorías** — una o varias casillas.
 
-El acceso aparece listado como tarjeta y se puede eliminar con su botón **Eliminar**.
+El acceso aparece listado como tarjeta y se puede **Editar** o **Eliminar** con sus botones.
 
 ## Estructura del proyecto
 
@@ -69,6 +70,10 @@ resources/
 ├── logo.svg                # fuente editable del logo
 └── icons/                  # íconos de menú en SVG
 docs/screenshots/           # capturas para el README
+packaging/
+├── build_deb.sh            # compila con PyInstaller y genera el .deb
+├── dotdesktop.desktop      # entrada de menú instalada
+├── postinst / postrm       # scripts de mantenimiento del paquete
 src/                        # vacío, reservado para módulos futuros
 tests/                      # pytest
 pyproject.toml              # ruff + pytest + metadatos
@@ -86,8 +91,23 @@ ruff check .                 # lint
 ruff format .                # formato
 ```
 
+## Empaquetado (.deb)
+
+Requiere `pyinstaller` y `dpkg-deb` (`dpkg-dev`):
+
+```bash
+python3 -m pip install --user --break-system-packages pyinstaller
+./packaging/build_deb.sh
+```
+
+El script compila un binario autónomo con PyInstaller y genera
+`packages/dotdesktop_<versión>_<arquitectura>.deb` (la carpeta `packages/` está
+ignorada por git). El paquete instala la app en `/opt/dotdesktop`, crea
+`/usr/bin/dotdesktop`, la entrada de menú en `/usr/share/applications` y el ícono en
+`/usr/share/icons/hicolor`.
+
 ## Persistencia
 
 - Preferencias (geometría de ventana y tema): `~/.config/dotdesktop/config.xml`.
-- Accesos directos creados por el programa: `launchers.json` (ignorado por git).
+- Registro de accesos creados por el programa: `~/.config/dotdesktop/launchers.json`.
 - Archivos `.desktop`: `~/.local/share/applications`.

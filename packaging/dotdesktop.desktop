@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=dotDesktop
+Comment=Registra aplicaciones descargadas en el menú de GNOME/Xfce
+Exec=dotdesktop
+Icon=dotdesktop
+Terminal=false
+Categories=Utility;System;

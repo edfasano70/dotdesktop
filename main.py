@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -37,13 +38,21 @@ PROGRAM_VERSION = "0.2.0"
 PROGRAM_DESCRIPTION = "Programa que registra en los menús de Gnome/Xfce Aplicaciones descargadas"
 PROGRAM_CREDITS = "Idea y programación: @Edfasano70"
 
-RESOURCES_DIR = Path(__file__).resolve().parent / "resources"
+def _base_dir() -> Path:
+    """Directory that holds bundled resources (handles PyInstaller builds)."""
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return Path(__file__).resolve().parent
+
+
+BASE_DIR = _base_dir()
+RESOURCES_DIR = BASE_DIR / "resources"
 ICONS_DIR = RESOURCES_DIR / "icons"
 LOGO_FILE = RESOURCES_DIR / "logo.png"
 
 CONFIG_DIR = Path.home() / ".config" / "dotdesktop"
 CONFIG_FILE = CONFIG_DIR / "config.xml"
-REGISTRY_FILE = Path(__file__).resolve().parent / "launchers.json"
+REGISTRY_FILE = CONFIG_DIR / "launchers.json"
 
 APPLICATIONS_DIR = Path.home() / ".local" / "share" / "applications"
 
@@ -208,8 +217,13 @@ def create_desktop_entry(
     icon_path: str = "",
     categories: str = DEFAULT_CATEGORIES,
     overwrite: bool = False,
+    previous_filename: str | None = None,
 ) -> Path:
-    """Write a .desktop launcher under APPLICATIONS_DIR and return its path."""
+    """Write a .desktop launcher under APPLICATIONS_DIR and return its path.
+
+    When ``previous_filename`` is given (editing), the old file is removed if the
+    generated name changed, and its registry entry is replaced.
+    """
     name = name.strip()
     if not name:
         raise ValueError("El nombre no puede estar vacío")
@@ -222,7 +236,8 @@ def create_desktop_entry(
 
     APPLICATIONS_DIR.mkdir(parents=True, exist_ok=True)
     dest = APPLICATIONS_DIR / f"{_slugify(name)}.desktop"
-    if dest.exists() and not overwrite:
+    is_same_file = previous_filename is not None and dest.name == previous_filename
+    if dest.exists() and not is_same_file and not overwrite:
         raise FileExistsError(dest)
 
     dest.write_text(build_desktop_entry(name, exec_path, icon_path, categories), encoding="utf-8")
@@ -230,12 +245,19 @@ def create_desktop_entry(
     refresh_desktop_database()
 
     registry = load_registry()
+    if previous_filename is not None and previous_filename != dest.name:
+        registry.pop(previous_filename, None)
+        old_path = APPLICATIONS_DIR / previous_filename
+        if old_path.exists():
+            old_path.unlink()
+
+    existing = registry.get(dest.name, {})
     registry[dest.name] = {
         "name": name,
         "exec": exec_path,
         "icon": icon_path,
         "categories": _normalize_categories(categories),
-        "created": datetime.now().isoformat(timespec="seconds"),
+        "created": existing.get("created", datetime.now().isoformat(timespec="seconds")),
     }
     save_registry(registry)
     return dest
@@ -340,11 +362,19 @@ class HelpDialog(QDialog):
 
 
 class LauncherDialog(QDialog):
-    """Formulario para crear un acceso directo .desktop."""
+    """Formulario para crear o editar un acceso directo .desktop."""
 
-    def __init__(self, parent=None, dark_mode: bool = False) -> None:
+    def __init__(
+        self,
+        parent=None,
+        dark_mode: bool = False,
+        filename: str | None = None,
+        info: dict | None = None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Nuevo acceso directo")
+        self.filename = filename
+        editing = filename is not None and info is not None
+        self.setWindowTitle("Editar acceso directo" if editing else "Nuevo acceso directo")
         self.setWindowIcon(_logo_icon())
         self.setMinimumWidth(460)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
@@ -375,15 +405,26 @@ class LauncherDialog(QDialog):
         cancel_btn.setFixedWidth(90)
         cancel_btn.clicked.connect(self.reject)
         buttons.addWidget(cancel_btn)
-        create_btn = QPushButton("Crear")
-        create_btn.setFixedWidth(90)
-        create_btn.setDefault(True)
-        create_btn.clicked.connect(self._create)
-        buttons.addWidget(create_btn)
+        save_btn = QPushButton("Guardar" if editing else "Crear")
+        save_btn.setFixedWidth(90)
+        save_btn.setDefault(True)
+        save_btn.clicked.connect(self._create)
+        buttons.addWidget(save_btn)
         layout.addLayout(buttons)
+
+        if editing:
+            self._apply_info(info)
 
         if dark_mode:
             self.setStyleSheet(DARK_STYLE)
+
+    def _apply_info(self, info: dict) -> None:
+        self.name_edit.setText(info.get("name", ""))
+        self.exec_edit.setText(info.get("exec", ""))
+        self.icon_edit.setText(info.get("icon", ""))
+        selected = {item for item in info.get("categories", "").split(";") if item}
+        for category, check in self.category_checks.items():
+            check.setChecked(category in selected)
 
     def _with_browse(self, field: QLineEdit, handler) -> QWidget:
         container = QWidget()
@@ -446,8 +487,9 @@ class LauncherDialog(QDialog):
                 return
 
         dest = APPLICATIONS_DIR / f"{_slugify(name)}.desktop"
+        is_same_file = self.filename is not None and dest.name == self.filename
         overwrite = False
-        if dest.exists():
+        if dest.exists() and not is_same_file:
             confirm = QMessageBox.question(
                 self,
                 "Ya existe",
@@ -458,21 +500,23 @@ class LauncherDialog(QDialog):
             overwrite = True
 
         try:
-            created = create_desktop_entry(
+            saved = create_desktop_entry(
                 name,
                 exec_path,
                 self.icon_edit.text(),
                 self._selected_categories(),
                 overwrite=overwrite,
+                previous_filename=self.filename,
             )
         except (ValueError, OSError) as error:
-            QMessageBox.critical(self, "Error", f"No se pudo crear el acceso directo:\n{error}")
+            QMessageBox.critical(self, "Error", f"No se pudo guardar el acceso directo:\n{error}")
             return
 
+        action = "actualizó" if self.filename is not None else "creó"
         QMessageBox.information(
             self,
-            "Acceso directo creado",
-            f"Se creó '{created.name}' en:\n{created.parent}",
+            f"Acceso directo {'actualizado' if self.filename else 'creado'}",
+            f"Se {action} '{saved.name}' en:\n{saved.parent}",
         )
         self.accept()
 
@@ -480,7 +524,7 @@ class LauncherDialog(QDialog):
 class LauncherCard(QFrame):
     """Tarjeta que representa un acceso directo creado por el programa."""
 
-    def __init__(self, filename: str, info: dict, on_delete) -> None:
+    def __init__(self, filename: str, info: dict, on_edit, on_delete) -> None:
         super().__init__()
         self.filename = filename
         self.setObjectName("launcherCard")
@@ -507,13 +551,23 @@ class LauncherCard(QFrame):
         exec_label.setFont(QFont("Arial", 9))
         text_layout.addWidget(exec_label)
 
+        labels = [name_label, exec_label]
         categories = info.get("categories", "")
         if categories:
             category_label = QLabel(categories)
             category_label.setFont(QFont("Arial", 8))
             text_layout.addWidget(category_label)
+            labels.append(category_label)
+
+        for label in labels:
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            label.setToolTip(label.text())
 
         layout.addLayout(text_layout, 1)
+
+        edit_btn = QPushButton(_icon("edit"), "Editar")
+        edit_btn.clicked.connect(lambda: on_edit(self.filename))
+        layout.addWidget(edit_btn)
 
         delete_btn = QPushButton(_icon("delete"), "Eliminar")
         delete_btn.clicked.connect(lambda: on_delete(self.filename))
@@ -585,6 +639,7 @@ class MainWindow(QMainWindow):
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll.setWidget(self.cards_container)
         outer.addWidget(self.scroll)
 
@@ -606,8 +661,17 @@ class MainWindow(QMainWindow):
             return
 
         for filename, info in registry.items():
-            card = LauncherCard(filename, info, self._delete_launcher)
+            card = LauncherCard(filename, info, self._edit_launcher, self._delete_launcher)
             self.cards_layout.insertWidget(self.cards_layout.count() - 1, card)
+
+    def _edit_launcher(self, filename: str) -> None:
+        info = load_registry().get(filename)
+        if info is None:
+            self._refresh_cards()
+            return
+        dialog = LauncherDialog(self, dark_mode=self.dark_mode, filename=filename, info=info)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._refresh_cards()
 
     def _delete_launcher(self, filename: str) -> None:
         info = load_registry().get(filename, {})

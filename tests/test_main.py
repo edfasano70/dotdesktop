@@ -1,6 +1,7 @@
 import xml.etree.ElementTree as ET
 
 import pytest
+from PyQt6.QtWidgets import QPushButton
 
 import main
 from main import AboutDialog, HelpDialog, LauncherDialog, MainWindow
@@ -142,6 +143,55 @@ def test_launcher_category_checkboxes(qapp):
     dialog.category_checks["Game"].setChecked(True)
     dialog.category_checks["Graphics"].setChecked(True)
     assert dialog._selected_categories() == "Game;Graphics;"
+
+
+def test_launcher_dialog_prefills_when_editing(qapp):
+    info = {
+        "name": "Mi Editor",
+        "exec": "/opt/editor",
+        "icon": "/tmp/i.png",
+        "categories": "Game;Graphics;",
+    }
+    dialog = LauncherDialog(filename="mi-editor.desktop", info=info)
+    assert dialog.windowTitle() == "Editar acceso directo"
+    assert dialog.name_edit.text() == "Mi Editor"
+    assert dialog.exec_edit.text() == "/opt/editor"
+    assert dialog.icon_edit.text() == "/tmp/i.png"
+    assert dialog._selected_categories() == "Game;Graphics;"
+
+
+def test_card_has_edit_and_delete_buttons(qapp):
+    card = main.LauncherCard("x.desktop", {"name": "X"}, lambda f: None, lambda f: None)
+    labels = {button.text() for button in card.findChildren(QPushButton)}
+    assert {"Editar", "Eliminar"} <= labels
+
+
+def test_create_desktop_entry_renames(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "APPLICATIONS_DIR", tmp_path)
+    monkeypatch.setattr(main, "refresh_desktop_database", lambda: None)
+    old = main.create_desktop_entry("Mi Editor", "/usr/bin/editor")
+
+    new = main.create_desktop_entry(
+        "Mi Editor Nuevo", "/usr/bin/editor", previous_filename=old.name
+    )
+    assert new.name == "mi-editor-nuevo.desktop"
+    assert not old.exists()
+    registry = main.load_registry()
+    assert list(registry) == ["mi-editor-nuevo.desktop"]
+    assert registry[new.name]["name"] == "Mi Editor Nuevo"
+
+
+def test_create_desktop_entry_edit_same_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "APPLICATIONS_DIR", tmp_path)
+    monkeypatch.setattr(main, "refresh_desktop_database", lambda: None)
+    dest = main.create_desktop_entry("Mi Editor", "/usr/bin/editor", categories="Game;")
+
+    again = main.create_desktop_entry(
+        "Mi Editor", "/usr/bin/other", categories="Utility;", previous_filename=dest.name
+    )
+    assert again == dest
+    assert "Exec=/usr/bin/other" in dest.read_text(encoding="utf-8")
+    assert main.load_registry()[dest.name]["categories"] == "Utility;"
 
 
 def test_create_desktop_entry(tmp_path, monkeypatch):
