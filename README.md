@@ -54,9 +54,13 @@ python main.py
 En la ventana principal, usa **Archivo → Nuevo acceso directo...** (o el botón
 **Nuevo acceso directo...**) e indica:
 
-1. **Nombre del programa** — tal como aparecerá en el menú.
-2. **Ejecutable** — ruta al binario o AppImage.
-3. **Ícono** (opcional) — PNG o SVG.
+1. **Nombre del programa** — tal como aparecerá en el menú. Se completa solo al
+   elegir el ejecutable, a partir de un `.desktop` existente o del nombre del archivo.
+2. **Ejecutable** — ruta al binario o AppImage. Al elegirlo, dotDesktop intenta
+   detectar el nombre y el ícono automáticamente (desde un `.desktop` existente,
+   una imagen junto al ejecutable o el ícono interno del AppImage).
+3. **Ícono** (opcional) — PNG o SVG; se completa solo si se detecta. Si no hay
+   ícono, se usa el genérico del sistema (`application-x-executable`).
 4. **Categorías** — una o varias casillas.
 
 El acceso aparece listado como tarjeta y se puede **Editar** o **Eliminar** con sus botones.
@@ -110,4 +114,5 @@ ignorada por git). El paquete instala la app en `/opt/dotdesktop`, crea
 
 - Preferencias (geometría de ventana y tema): `~/.config/dotdesktop/config.xml`.
 - Registro de accesos creados por el programa: `~/.config/dotdesktop/launchers.json`.
+- Íconos extraídos de AppImages: `~/.local/share/dotdesktop/icons/`.
 - Archivos `.desktop`: `~/.local/share/applications`.

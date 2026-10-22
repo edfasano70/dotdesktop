@@ -24,3 +24,5 @@ def _isolated_config(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main, "CONFIG_FILE", tmp_path / "config.xml")
     monkeypatch.setattr(main, "REGISTRY_FILE", tmp_path / "launchers.json")
+    monkeypatch.setattr(main, "ICON_CACHE_DIR", tmp_path / "icons")
+    monkeypatch.setattr(main, "ICON_SEARCH_DIRS", ())

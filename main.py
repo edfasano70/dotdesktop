@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
@@ -34,9 +36,10 @@ from PyQt6.QtWidgets import (
 
 PROGRAM_NAME = "dotDesktop"
 PROGRAM_TITLE = "dotDesktop"
-PROGRAM_VERSION = "0.2.0"
+PROGRAM_VERSION = "0.5.0"
 PROGRAM_DESCRIPTION = "Programa que registra en los menús de Gnome/Xfce Aplicaciones descargadas"
 PROGRAM_CREDITS = "Idea y programación: @Edfasano70"
+
 
 def _base_dir() -> Path:
     """Directory that holds bundled resources (handles PyInstaller builds)."""
@@ -55,6 +58,19 @@ CONFIG_FILE = CONFIG_DIR / "config.xml"
 REGISTRY_FILE = CONFIG_DIR / "launchers.json"
 
 APPLICATIONS_DIR = Path.home() / ".local" / "share" / "applications"
+
+GENERIC_ICON = "application-x-executable"
+ICON_IMAGE_SUFFIXES = (".png", ".svg", ".xpm", ".jpg", ".jpeg", ".ico")
+ICON_SEARCH_DIRS = (
+    Path.home() / ".local" / "share" / "icons",
+    Path.home() / ".icons",
+    Path("/usr/local/share/icons"),
+    Path("/usr/share/icons"),
+    Path("/usr/share/pixmaps"),
+)
+ICON_CACHE_DIR = Path.home() / ".local" / "share" / "dotdesktop" / "icons"
+ICON_NEARBY_DIRS = ("assets", "resources", "icons", "share/icons", "usr/share/icons")
+_SQUASHFS_MAGIC = b"hsqs"
 
 CATEGORIES = (
     "AudioVideo",
@@ -101,6 +117,385 @@ def _logo_icon() -> QIcon:
     if LOGO_FILE.is_file():
         return QIcon(str(LOGO_FILE))
     return QIcon()
+
+
+def _generic_icon() -> QIcon:
+    icon = QIcon.fromTheme(GENERIC_ICON)
+    return icon if not icon.isNull() else _logo_icon()
+
+
+def _icon_from_value(value: str) -> QIcon:
+    value = (value or "").strip()
+    if not value:
+        return _generic_icon()
+    path = Path(os.path.expanduser(value))
+    if path.is_file():
+        return QIcon(str(path))
+    if not path.is_absolute() and "/" not in value:
+        icon = QIcon.fromTheme(value)
+        if not icon.isNull():
+            return icon
+    return _generic_icon()
+
+
+def _prefer_svg(paths: list[Path]) -> Path:
+    for path in paths:
+        if path.suffix.lower() == ".svg":
+            return path
+    return max(paths, key=lambda item: item.stat().st_size)
+
+
+def _resolve_icon(value: str, base_dir: Path | None = None) -> str:
+    """Return an existing icon file for a path or an icon theme name."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    raw = os.path.expanduser(value)
+    if Path(raw).is_absolute() or "/" in raw:
+        candidate = Path(raw)
+        if not candidate.is_absolute() and base_dir is not None:
+            candidate = base_dir / candidate
+        return str(candidate.resolve()) if candidate.is_file() else ""
+    if base_dir is not None:
+        local = base_dir / raw
+        if local.is_file():
+            return str(local.resolve())
+
+    found: list[Path] = []
+    for root in ICON_SEARCH_DIRS:
+        root = Path(root)
+        if not root.is_dir():
+            continue
+        try:
+            found.extend(path for path in root.glob(f"**/apps/{raw}.*") if path.is_file())
+            found.extend(path for path in root.glob(f"{raw}.*") if path.is_file())
+        except OSError:
+            continue
+    if not found:
+        return ""
+    return str(_prefer_svg(found).resolve())
+
+
+def _read_desktop_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        if path.stat().st_size > 1024 * 1024:
+            return values
+        data = path.read_bytes()
+    except OSError:
+        return values
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("#", "[")) or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        values.setdefault(key.strip(), value.strip())
+    return values
+
+
+def _program_from_exec(exec_value: str) -> str:
+    """Return the program of a desktop Exec line, without arguments."""
+    value = exec_value.strip()
+    if not value:
+        return ""
+    if value.startswith('"'):
+        chars: list[str] = []
+        escaped = False
+        for char in value[1:]:
+            if escaped:
+                chars.append(char)
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                break
+            else:
+                chars.append(char)
+        return "".join(chars)
+    return value.split()[0]
+
+
+def _best_image_in(root: Path, stem: str) -> str:
+    if not root.is_dir():
+        return ""
+    try:
+        images = [
+            path
+            for path in root.rglob("*")
+            if path.is_file() and path.suffix.lower() in ICON_IMAGE_SUFFIXES
+        ]
+    except OSError:
+        return ""
+    if not images:
+        return ""
+    for wanted in (stem.lower(), "appicon", "icon", "logo", "application"):
+        matches = [path for path in images if path.stem.lower() == wanted]
+        if matches:
+            return str(_prefer_svg(matches).resolve())
+    if len(images) == 1:
+        return str(images[0].resolve())
+    return ""
+
+
+def _nearby_icon(exec_path: Path) -> str:
+    """Look for an icon bundled next to the given executable."""
+    directory = exec_path.parent
+    stem = exec_path.stem
+    for suffix in ICON_IMAGE_SUFFIXES:
+        candidate = directory / f"{stem}{suffix}"
+        if candidate.is_file():
+            return str(candidate.resolve())
+    dir_icon = directory / ".DirIcon"
+    if dir_icon.is_file():
+        return str(dir_icon.resolve())
+    for relative in ICON_NEARBY_DIRS:
+        found = _best_image_in(directory / relative, stem)
+        if found:
+            return found
+    try:
+        images = [
+            path
+            for path in directory.iterdir()
+            if path.is_file() and path.suffix.lower() in ICON_IMAGE_SUFFIXES
+        ]
+    except OSError:
+        return ""
+    if len(images) == 1:
+        return str(images[0].resolve())
+    return ""
+
+
+def _is_appimage(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(12)
+    except OSError:
+        return False
+    return header[:4] == b"\x7fELF" and header[8:11] == b"AI\x02"
+
+
+def _valid_squashfs_superblock(path: Path, offset: int, size: int) -> bool:
+    if offset < 0 or offset + 96 > size:
+        return False
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            block = handle.read(96)
+    except OSError:
+        return False
+    if len(block) < 96 or block[:4] != _SQUASHFS_MAGIC:
+        return False
+    major = int.from_bytes(block[28:30], "little")
+    minor = int.from_bytes(block[30:32], "little")
+    block_size = int.from_bytes(block[12:16], "little")
+    bytes_used = int.from_bytes(block[40:48], "little")
+    if major != 4 or minor != 0:
+        return False
+    if block_size < 4096 or block_size > 1 << 20 or block_size & (block_size - 1):
+        return False
+    return 0 < bytes_used <= size - offset
+
+
+def _appimage_squashfs_offset(path: Path) -> int | None:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            position = 0
+            tail = b""
+            while True:
+                chunk = handle.read(1 << 20)
+                if not chunk:
+                    return None
+                block = tail + chunk
+                base = position - len(tail)
+                index = 0
+                while True:
+                    found = block.find(_SQUASHFS_MAGIC, index)
+                    if found < 0:
+                        break
+                    offset = base + found
+                    if _valid_squashfs_superblock(path, offset, size):
+                        return offset
+                    index = found + 4
+                tail = block[-3:]
+                position += len(chunk)
+    except OSError:
+        return None
+
+
+def _follow_symlink(current: str, link: str) -> str:
+    if os.path.isabs(link):
+        return link.lstrip("/")
+    return os.path.normpath(os.path.join(os.path.dirname(current), link))
+
+
+def _extract_with_unsquashfs(tool: str, image: Path, offset: int, tmpdir: Path) -> Path | None:
+    current = ".DirIcon"
+    for attempt in range(10):
+        root = tmpdir / f"unsquashfs-{attempt}"
+        try:
+            subprocess.run(
+                [
+                    tool,
+                    "-no-progress",
+                    "-no-xattrs",
+                    "-o",
+                    str(offset),
+                    "-d",
+                    str(root),
+                    str(image),
+                    current,
+                ],
+                check=False,
+                capture_output=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        extracted = root / current
+        if not extracted.is_symlink():
+            return extracted if extracted.is_file() else None
+        current = _follow_symlink(current, os.readlink(extracted))
+    return None
+
+
+def _extract_with_runtime(image: Path, tmpdir: Path) -> Path | None:
+    current = ".DirIcon"
+    for attempt in range(10):
+        work = tmpdir / f"runtime-{attempt}"
+        work.mkdir(exist_ok=True)
+        try:
+            subprocess.run(
+                [str(image), "--appimage-extract", current],
+                cwd=work,
+                check=False,
+                capture_output=True,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        root = work / "squashfs-root"
+        extracted = root / current
+        if not extracted.is_symlink():
+            return extracted if extracted.is_file() else None
+        current = _follow_symlink(current, os.readlink(extracted))
+    return None
+
+
+def _cache_icon(source: Path, exec_path: Path) -> str:
+    try:
+        ICON_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        suffix = source.suffix.lower() or ".png"
+        digest = hashlib.sha1(str(exec_path.resolve()).encode("utf-8")).hexdigest()[:10]
+        destination = ICON_CACHE_DIR / f"{_slugify(exec_path.stem)}-{digest}{suffix}"
+        shutil.copy2(source, destination)
+    except OSError:
+        return ""
+    return str(destination)
+
+
+def _extract_appimage_icon(path: Path) -> str:
+    offset = _appimage_squashfs_offset(path)
+    unsquashfs = shutil.which("unsquashfs")
+    with tempfile.TemporaryDirectory(prefix="dotdesktop-icon-") as tmp:
+        tmpdir = Path(tmp)
+        extracted: Path | None = None
+        if unsquashfs and offset is not None:
+            extracted = _extract_with_unsquashfs(unsquashfs, path, offset, tmpdir)
+        if extracted is None:
+            extracted = _extract_with_runtime(path, tmpdir)
+        if extracted is None:
+            return ""
+        return _cache_icon(extracted, path)
+
+
+def _matching_desktops(exec_path: Path) -> list[Path]:
+    """Return existing .desktop files whose Exec field points to the executable."""
+    target = exec_path.resolve() if exec_path.exists() else exec_path
+    matches: list[Path] = []
+    seen: set[Path] = set()
+    for directory in (APPLICATIONS_DIR, exec_path.parent):
+        if directory in seen or not directory.is_dir():
+            continue
+        seen.add(directory)
+        for desktop in sorted(directory.glob("*.desktop"))[:50]:
+            program = _program_from_exec(_read_desktop_file(desktop).get("Exec", ""))
+            if not program:
+                continue
+            candidate = Path(os.path.expanduser(program))
+            if not candidate.is_absolute():
+                candidate = desktop.parent / candidate
+            try:
+                if candidate.resolve() == target:
+                    matches.append(desktop)
+            except OSError:
+                continue
+    return matches
+
+
+def _name_from_filename(path: Path) -> str:
+    stem = re.sub(r"\.(?:appimage|run|bin|exe)$", "", path.name, flags=re.IGNORECASE)
+    stem = re.sub(
+        r"[-_.](?:x86_64|amd64|arm64|aarch64|i386|i686|linux|win64|osx)(?:[-_.].*)?$",
+        "",
+        stem,
+        flags=re.IGNORECASE,
+    )
+    stem = re.sub(r"[-_.]v?\d[\w.-]*$", "", stem, flags=re.IGNORECASE)
+    parts = [part for part in re.split(r"[-_.]+", stem) if part]
+    if not parts:
+        return ""
+    return " ".join(
+        part if any(char.isupper() for char in part) else part.capitalize() for part in parts
+    )
+
+
+def _detect_name(exec_path: str) -> str:
+    """Try to derive a display name for the given executable path."""
+    expanded = os.path.expanduser((exec_path or "").strip())
+    if not expanded:
+        return ""
+    path = Path(expanded)
+
+    if path.suffix == ".desktop" and path.is_file():
+        return _read_desktop_file(path).get("Name", "").strip()
+
+    for desktop in _matching_desktops(path):
+        name = _read_desktop_file(desktop).get("Name", "").strip()
+        if name:
+            return name
+    return _name_from_filename(path)
+
+
+def _detect_icon(exec_path: str) -> str:
+    """Try to find an icon for the given executable path."""
+    expanded = os.path.expanduser((exec_path or "").strip())
+    if not expanded:
+        return ""
+    path = Path(expanded)
+
+    if path.suffix == ".desktop" and path.is_file():
+        fields = _read_desktop_file(path)
+        if fields.get("Icon", "") == GENERIC_ICON:
+            return ""
+        return _resolve_icon(fields.get("Icon", ""), path.parent)
+
+    for desktop in _matching_desktops(path):
+        icon = _read_desktop_file(desktop).get("Icon", "")
+        if not icon or icon == GENERIC_ICON:
+            continue
+        resolved = _resolve_icon(icon, desktop.parent)
+        if resolved:
+            return resolved
+
+    target = path.resolve() if path.exists() else path
+    if target.is_file():
+        nearby = _nearby_icon(target)
+        if nearby:
+            return nearby
+        if _is_appimage(target):
+            return _extract_appimage_icon(target)
+    return ""
 
 
 _EXEC_RESERVED = set(" \t\n\"'\\><~|&;$*?#()`")
@@ -233,6 +628,10 @@ def create_desktop_entry(
         raise ValueError("La ruta del ejecutable no puede estar vacía")
 
     icon_path = os.path.expanduser(icon_path.strip())
+    if not icon_path:
+        icon_path = _detect_icon(exec_path)
+    if not icon_path:
+        icon_path = GENERIC_ICON
 
     APPLICATIONS_DIR.mkdir(parents=True, exist_ok=True)
     dest = APPLICATIONS_DIR / f"{_slugify(name)}.desktop"
@@ -373,6 +772,8 @@ class LauncherDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.filename = filename
+        self._auto_name = ""
+        self._auto_icon = ""
         editing = filename is not None and info is not None
         self.setWindowTitle("Editar acceso directo" if editing else "Nuevo acceso directo")
         self.setWindowIcon(_logo_icon())
@@ -455,12 +856,39 @@ class LauncherDialog(QDialog):
         path, _ = QFileDialog.getOpenFileName(self, "Selecciona el ejecutable")
         if path:
             self.exec_edit.setText(path)
+            self._apply_detected_fields(path)
+
+    def _apply_detected_fields(self, exec_path: str) -> None:
+        name = self.name_edit.text().strip()
+        icon = self.icon_edit.text().strip()
+        detect_name = not name or name == self._auto_name
+        detect_icon = not icon or icon == self._auto_icon
+        if not detect_name and not detect_icon:
+            return
+
+        detected_name = ""
+        detected_icon = ""
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            if detect_name:
+                detected_name = _detect_name(exec_path)
+            if detect_icon:
+                detected_icon = _detect_icon(exec_path)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if detect_name and detected_name:
+            self.name_edit.setText(detected_name)
+            self._auto_name = detected_name
+        if detect_icon and detected_icon:
+            self.icon_edit.setText(detected_icon)
+            self._auto_icon = detected_icon
 
     def _browse_icon(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Selecciona el ícono",
-            filter="Imágenes (*.png *.svg *.xpm)",
+            filter="Imágenes (*.png *.svg *.xpm *.ico)",
         )
         if path:
             self.icon_edit.setText(path)
@@ -469,11 +897,22 @@ class LauncherDialog(QDialog):
         name = self.name_edit.text().strip()
         exec_path = self.exec_edit.text().strip()
 
-        if not name:
-            QMessageBox.warning(self, "Datos incompletos", "El nombre no puede estar vacío.")
-            return
         if not exec_path:
             QMessageBox.warning(self, "Datos incompletos", "Indica la ruta del ejecutable.")
+            return
+
+        if not name:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                name = _detect_name(exec_path)
+            finally:
+                QApplication.restoreOverrideCursor()
+            if name:
+                self.name_edit.setText(name)
+                self._auto_name = name
+
+        if not name:
+            QMessageBox.warning(self, "Datos incompletos", "El nombre no puede estar vacío.")
             return
 
         if not os.path.isfile(os.path.expanduser(exec_path)):
@@ -499,11 +938,21 @@ class LauncherDialog(QDialog):
                 return
             overwrite = True
 
+        icon_path = self.icon_edit.text().strip()
+        if not icon_path:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                icon_path = _detect_icon(exec_path)
+            finally:
+                QApplication.restoreOverrideCursor()
+            if icon_path:
+                self.icon_edit.setText(icon_path)
+
         try:
             saved = create_desktop_entry(
                 name,
                 exec_path,
-                self.icon_edit.text(),
+                icon_path,
                 self._selected_categories(),
                 overwrite=overwrite,
                 previous_filename=self.filename,
@@ -533,8 +982,7 @@ class LauncherCard(QFrame):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(12)
 
-        icon_path = info.get("icon", "")
-        icon = QIcon(icon_path) if icon_path and Path(icon_path).is_file() else _logo_icon()
+        icon = _icon_from_value(info.get("icon", ""))
         icon_label = QLabel()
         icon_label.setPixmap(icon.pixmap(48, 48))
         icon_label.setFixedSize(48, 48)

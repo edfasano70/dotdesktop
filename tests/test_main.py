@@ -251,3 +251,166 @@ def test_main_window_shows_cards(qapp, tmp_path, monkeypatch):
 def test_main_window_without_launchers(qapp):
     window = MainWindow()
     assert not window.cards_container.findChildren(main.LauncherCard)
+
+
+def test_program_from_exec_handles_quotes_and_arguments():
+    assert main._program_from_exec('"/opt/Mi App/app" --flag') == "/opt/Mi App/app"
+    assert main._program_from_exec("/usr/bin/app %U") == "/usr/bin/app"
+    assert main._program_from_exec("") == ""
+
+
+def test_detect_icon_from_matching_desktop(tmp_path, monkeypatch):
+    apps = tmp_path / "apps"
+    apps.mkdir()
+    monkeypatch.setattr(main, "APPLICATIONS_DIR", apps)
+
+    program = tmp_path / "program"
+    program.mkdir()
+    exe = program / "editor"
+    exe.write_text("", encoding="utf-8")
+    icon = program / "editor.png"
+    icon.write_bytes(b"\x89PNG")
+    (apps / "editor.desktop").write_text(
+        f"[Desktop Entry]\nExec={exe}\nIcon={icon}\n", encoding="utf-8"
+    )
+
+    assert main._detect_icon(str(exe)) == str(icon.resolve())
+
+
+def test_detect_icon_from_desktop_file_argument(tmp_path):
+    icon = tmp_path / "icon.svg"
+    icon.write_text("<svg/>", encoding="utf-8")
+    desktop = tmp_path / "app.desktop"
+    desktop.write_text(f"[Desktop Entry]\nIcon={icon}\n", encoding="utf-8")
+
+    assert main._detect_icon(str(desktop)) == str(icon.resolve())
+
+
+def test_detect_icon_from_nearby_image(tmp_path):
+    exe = tmp_path / "app"
+    exe.write_text("", encoding="utf-8")
+    icon = tmp_path / "app.svg"
+    icon.write_text("<svg/>", encoding="utf-8")
+
+    assert main._detect_icon(str(exe)) == str(icon.resolve())
+
+
+def test_detect_icon_from_single_image(tmp_path):
+    exe = tmp_path / "app"
+    exe.write_text("", encoding="utf-8")
+    icon = tmp_path / "123456.png"
+    icon.write_bytes(b"\x89PNG")
+
+    assert main._detect_icon(str(exe)) == str(icon.resolve())
+
+
+def test_detect_icon_from_assets_dir(tmp_path):
+    exe = tmp_path / "app"
+    exe.write_text("", encoding="utf-8")
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    icon = assets / "appicon.png"
+    icon.write_bytes(b"\x89PNG")
+
+    assert main._detect_icon(str(exe)) == str(icon.resolve())
+
+
+def test_detect_icon_resolves_theme_name(tmp_path, monkeypatch):
+    icon = tmp_path / "icons" / "hicolor" / "48x48" / "apps" / "miapp.svg"
+    icon.parent.mkdir(parents=True)
+    icon.write_text("<svg/>", encoding="utf-8")
+    monkeypatch.setattr(main, "ICON_SEARCH_DIRS", (tmp_path / "icons",))
+
+    apps = tmp_path / "apps"
+    apps.mkdir()
+    monkeypatch.setattr(main, "APPLICATIONS_DIR", apps)
+    exe = tmp_path / "app"
+    exe.write_text("", encoding="utf-8")
+    (apps / "miapp.desktop").write_text(
+        f"[Desktop Entry]\nExec={exe}\nIcon=miapp\n", encoding="utf-8"
+    )
+
+    assert main._detect_icon(str(exe)) == str(icon.resolve())
+
+
+def test_launcher_dialog_detects_name_and_icon_without_overwriting_manual(qapp, tmp_path):
+    exe = tmp_path / "app"
+    exe.write_text("", encoding="utf-8")
+    icon = tmp_path / "app.png"
+    icon.write_bytes(b"\x89PNG")
+
+    dialog = LauncherDialog()
+    dialog._apply_detected_fields(str(exe))
+    assert dialog.name_edit.text() == "App"
+    assert dialog.icon_edit.text() == str(icon.resolve())
+
+    dialog.name_edit.setText("Mi App")
+    dialog.icon_edit.setText("/ruta/manual.png")
+    dialog._apply_detected_fields(str(exe))
+    assert dialog.name_edit.text() == "Mi App"
+    assert dialog.icon_edit.text() == "/ruta/manual.png"
+
+
+def test_detect_name_from_matching_desktop(tmp_path, monkeypatch):
+    apps = tmp_path / "apps"
+    apps.mkdir()
+    monkeypatch.setattr(main, "APPLICATIONS_DIR", apps)
+    exe = tmp_path / "app"
+    exe.write_text("", encoding="utf-8")
+    (apps / "app.desktop").write_text(
+        f"[Desktop Entry]\nName=Mi Aplicación\nExec={exe}\n", encoding="utf-8"
+    )
+
+    assert main._detect_name(str(exe)) == "Mi Aplicación"
+
+
+def test_detect_name_from_desktop_file_argument(tmp_path):
+    desktop = tmp_path / "app.desktop"
+    desktop.write_text("[Desktop Entry]\nName=Editor\n", encoding="utf-8")
+
+    assert main._detect_name(str(desktop)) == "Editor"
+
+
+def test_detect_name_from_filename(tmp_path):
+    assert main._detect_name(str(tmp_path / "fritzing-1.0.6-l2239-04e5bb02-qt6.AppImage")) == (
+        "Fritzing"
+    )
+    assert main._detect_name(str(tmp_path / "LibreSprite-x86_64.AppImage")) == "LibreSprite"
+    assert main._detect_name(str(tmp_path / "Digital-Logic-Sim.x86_64")) == "Digital Logic Sim"
+    assert main._detect_name("") == ""
+
+
+def test_create_desktop_entry_uses_generic_icon(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "APPLICATIONS_DIR", tmp_path)
+    monkeypatch.setattr(main, "refresh_desktop_database", lambda: None)
+
+    dest = main.create_desktop_entry("Mi Editor", str(tmp_path / "missing-bin"))
+    assert f"Icon={main.GENERIC_ICON}\n" in dest.read_text(encoding="utf-8")
+    assert main.load_registry()[dest.name]["icon"] == main.GENERIC_ICON
+
+
+def _fake_superblock(block_size=131072, bytes_used=2048):
+    block = bytearray(96)
+    block[0:4] = b"hsqs"
+    block[12:16] = block_size.to_bytes(4, "little")
+    block[28:30] = (4).to_bytes(2, "little")
+    block[30:32] = (0).to_bytes(2, "little")
+    block[40:48] = bytes_used.to_bytes(8, "little")
+    return bytes(block)
+
+
+def test_appimage_detection_and_squashfs_offset(tmp_path):
+    image = tmp_path / "app.AppImage"
+    payload = bytearray(4096)
+    payload[0:4] = b"\x7fELF"
+    payload[8:11] = b"AI\x02"
+    payload[64:68] = b"hsqs"
+    payload[128:224] = _fake_superblock()
+    image.write_bytes(payload)
+
+    assert main._is_appimage(image)
+    assert main._appimage_squashfs_offset(image) == 128
+
+    image.write_bytes(b"\x7fELF" + b"\x00" * 8)
+    assert not main._is_appimage(image)
+    assert main._appimage_squashfs_offset(image) is None
