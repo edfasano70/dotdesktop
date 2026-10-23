@@ -12,15 +12,19 @@ Idea y programación: **@Edfasano70**
 | --- | --- |
 | ![Ventana principal](docs/screenshots/main.png) | ![Modo oscuro](docs/screenshots/main_dark.png) |
 
-| Nuevo acceso directo | Acerca de |
+| Acceso desde ejecutable | Acceso desde comando |
 | --- | --- |
-| ![Nuevo acceso directo](docs/screenshots/launcher_dialog.png) | ![Acerca de](docs/screenshots/about.png) |
+| ![Acceso desde ejecutable](docs/screenshots/launcher_dialog.png) | ![Acceso desde comando](docs/screenshots/launcher_command.png) |
+
+| Acerca de |
+| --- |
+| ![Acerca de](docs/screenshots/about.png) |
 
 ## Características
 
-- Crea archivos `.desktop` con nombre, ejecutable, ícono y categorías.
-- Interfaz gráfica en PyQt6, con selector de archivos y lista de categorías.
-- Valida el ejecutable y avisa si no existe.
+- Crea archivos `.desktop` con nombre, ejecutable o comando, carpeta de inicio, ícono y categorías.
+- Interfaz gráfica en PyQt6, con selector de archivos, carpetas y lista de categorías.
+- Valida el ejecutable y la carpeta de inicio, y avisa si no existen.
 - Pregunta antes de sobrescribir un acceso directo existente.
 - Escapa los campos según la especificación *Desktop Entry*.
 - Refresca el menú con `update-desktop-database` si está disponible.
@@ -54,14 +58,21 @@ python main.py
 En la ventana principal, usa **Archivo → Nuevo acceso directo...** (o el botón
 **Nuevo acceso directo...**) e indica:
 
-1. **Nombre del programa** — tal como aparecerá en el menú. Se completa solo al
+1. **Tipo** — `Ejecutable` para un binario o AppImage, o `Comando` para una línea
+   de comandos (por ejemplo `bash -c "..."`).
+2. **Nombre del programa** — tal como aparecerá en el menú. Se completa solo al
    elegir el ejecutable, a partir de un `.desktop` existente o del nombre del archivo.
-2. **Ejecutable** — ruta al binario o AppImage. Al elegirlo, dotDesktop intenta
+3. **Ejecutable** — ruta al binario o AppImage. Al elegirlo, dotDesktop intenta
    detectar el nombre y el ícono automáticamente (desde un `.desktop` existente,
    una imagen junto al ejecutable o el ícono interno del AppImage).
-3. **Ícono** (opcional) — PNG o SVG; se completa solo si se detecta. Si no hay
+4. **Comando** — línea de comandos que se ejecutará al abrir el acceso.
+5. **Carpeta de inicio** (opcional) — directorio de trabajo (`Path=` del `.desktop`).
+6. **Ícono** (opcional) — PNG o SVG; se completa solo si se detecta. Si no hay
    ícono, se usa el genérico del sistema (`application-x-executable`).
-4. **Categorías** — una o varias casillas.
+7. **Categorías** — una o varias casillas.
+
+Ejemplo de acceso por comando: **Tipo** `Comando`, **Comando**
+`bash -c "date +%F"` y **Carpeta de inicio** `/home/usuario`.
 
 El acceso aparece listado como tarjeta y se puede **Editar** o **Eliminar** con sus botones.
 

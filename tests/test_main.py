@@ -109,6 +109,8 @@ def test_escape_exec_arg():
     assert main._escape_exec_arg("/usr/bin/app") == "/usr/bin/app"
     assert main._escape_exec_arg("/opt/Mi App/app") == '"/opt/Mi App/app"'
     assert main._escape_exec_arg('/opt/a"b') == '"/opt/a\\"b"'
+    assert main._escape_exec_arg("/opt/date+%F") == "/opt/date+%%F"
+    assert main._escape_exec_arg("/opt/100% app") == '"/opt/100%% app"'
 
 
 def test_slugify():
@@ -129,6 +131,28 @@ def test_build_desktop_entry():
 def test_build_desktop_entry_omits_empty_categories():
     content = main.build_desktop_entry("X", "/usr/bin/x", categories="")
     assert "Categories=" not in content
+
+
+def test_build_desktop_entry_with_command_and_working_dir():
+    content = main.build_desktop_entry(
+        "Consola",
+        "",
+        "/tmp/icon.png",
+        working_dir="/home/usuario",
+        command="bash -c 'echo hola'",
+    )
+    assert "Exec=bash -c 'echo hola'\n" in content
+    assert "Path=/home/usuario\n" in content
+
+
+def test_build_desktop_entry_escapes_percent_in_command():
+    content = main.build_desktop_entry("Fecha", "", command="bash -c 'date +%F'")
+    assert "Exec=bash -c 'date +%%F'\n" in content
+
+
+def test_build_desktop_entry_rejects_multiline_command():
+    with pytest.raises(ValueError):
+        main.build_desktop_entry("Consola", "", command="bash -c\necho hola")
 
 
 def test_launcher_category_checkboxes(qapp):
@@ -158,6 +182,51 @@ def test_launcher_dialog_prefills_when_editing(qapp):
     assert dialog.exec_edit.text() == "/opt/editor"
     assert dialog.icon_edit.text() == "/tmp/i.png"
     assert dialog._selected_categories() == "Game;Graphics;"
+
+
+def test_launcher_dialog_prefills_command_when_editing(qapp, tmp_path):
+    info = {
+        "name": "Consola",
+        "exec": "bash -c 'echo hola'",
+        "command": "bash -c 'echo hola'",
+        "working_dir": str(tmp_path),
+        "categories": "Utility;",
+    }
+    dialog = LauncherDialog(filename="consola.desktop", info=info)
+    assert dialog.mode_combo.currentIndex() == 1
+    assert dialog.command_edit.text() == "bash -c 'echo hola'"
+    assert dialog.working_dir_edit.text() == str(tmp_path)
+    assert dialog.command_edit.isVisibleTo(dialog)
+    assert not dialog.exec_edit.isVisibleTo(dialog)
+
+
+def test_launcher_dialog_toggles_mode(qapp):
+    dialog = LauncherDialog()
+    assert dialog.exec_edit.isVisibleTo(dialog)
+    assert not dialog.command_edit.isVisibleTo(dialog)
+
+    dialog.mode_combo.setCurrentIndex(1)
+    assert not dialog.exec_edit.isVisibleTo(dialog)
+    assert dialog.command_edit.isVisibleTo(dialog)
+
+
+def test_launcher_dialog_creates_command_shortcut(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "APPLICATIONS_DIR", tmp_path)
+    monkeypatch.setattr(main, "refresh_desktop_database", lambda: None)
+    monkeypatch.setattr(main.QMessageBox, "information", lambda *args, **kwargs: None)
+
+    dialog = LauncherDialog()
+    dialog.name_edit.setText("Consola")
+    dialog.mode_combo.setCurrentIndex(1)
+    dialog.command_edit.setText("bash -c 'echo hola'")
+    dialog.working_dir_edit.setText(str(tmp_path))
+    dialog._create()
+
+    dest = tmp_path / "consola.desktop"
+    assert dest.is_file()
+    content = dest.read_text(encoding="utf-8")
+    assert "Exec=bash -c 'echo hola'\n" in content
+    assert f"Path={tmp_path}\n" in content
 
 
 def test_card_has_edit_and_delete_buttons(qapp):
@@ -214,6 +283,31 @@ def test_create_desktop_entry_requires_name(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "refresh_desktop_database", lambda: None)
     with pytest.raises(ValueError):
         main.create_desktop_entry("   ", "/usr/bin/editor")
+
+
+def test_create_desktop_entry_requires_executable_or_command(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "APPLICATIONS_DIR", tmp_path)
+    monkeypatch.setattr(main, "refresh_desktop_database", lambda: None)
+    with pytest.raises(ValueError):
+        main.create_desktop_entry("Consola")
+
+
+def test_create_desktop_entry_from_command(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "APPLICATIONS_DIR", tmp_path)
+    monkeypatch.setattr(main, "refresh_desktop_database", lambda: None)
+    dest = main.create_desktop_entry(
+        "Consola", command="bash -c 'echo hola'", working_dir=str(tmp_path)
+    )
+
+    content = dest.read_text(encoding="utf-8")
+    assert "Exec=bash -c 'echo hola'\n" in content
+    assert f"Path={tmp_path}\n" in content
+    assert f"Icon={main.GENERIC_ICON}\n" in content
+
+    info = main.load_registry()[dest.name]
+    assert info["command"] == "bash -c 'echo hola'"
+    assert info["working_dir"] == str(tmp_path)
+    assert info["exec"] == "bash -c 'echo hola'"
 
 
 def test_create_desktop_entry_registers(tmp_path, monkeypatch):

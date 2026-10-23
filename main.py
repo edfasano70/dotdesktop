@@ -17,6 +17,7 @@ from PyQt6.QtGui import QAction, QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -36,7 +37,7 @@ from PyQt6.QtWidgets import (
 
 PROGRAM_NAME = "dotDesktop"
 PROGRAM_TITLE = "dotDesktop"
-PROGRAM_VERSION = "0.5.0"
+PROGRAM_VERSION = "0.6.0"
 PROGRAM_DESCRIPTION = "Programa que registra en los menús de Gnome/Xfce Aplicaciones descargadas"
 PROGRAM_CREDITS = "Idea y programación: @Edfasano70"
 
@@ -512,11 +513,20 @@ def _escape_exec_arg(value: str) -> str:
     """Quote a single Exec argument following the Desktop Entry Specification."""
     if not value:
         return '""'
+    value = value.replace("%", "%%")
     if not any(char in _EXEC_RESERVED for char in value):
         return value
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     escaped = escaped.replace("$", "\\$").replace("`", "\\`")
     return f'"{escaped}"'
+
+
+def _escape_exec_command(command: str) -> str:
+    """Return a command line ready for the Exec field of a desktop entry."""
+    command = command.strip()
+    if "\n" in command or "\r" in command:
+        raise ValueError("El comando no puede tener saltos de línea")
+    return _escape_desktop_value(command).replace("%", "%%")
 
 
 def _slugify(name: str) -> str:
@@ -536,15 +546,22 @@ def build_desktop_entry(
     exec_path: str,
     icon_path: str = "",
     categories: str = DEFAULT_CATEGORIES,
+    working_dir: str = "",
+    command: str = "",
 ) -> str:
     """Return the contents of a .desktop launcher for the given program."""
     lines = [
         "[Desktop Entry]",
         "Type=Application",
         f"Name={_escape_desktop_value(name)}",
-        f"Exec={_escape_exec_arg(exec_path)}",
-        "Terminal=false",
     ]
+    if command.strip():
+        lines.append(f"Exec={_escape_exec_command(command)}")
+    else:
+        lines.append(f"Exec={_escape_exec_arg(exec_path)}")
+    if working_dir.strip():
+        lines.append(f"Path={_escape_desktop_value(working_dir.strip())}")
+    lines.append("Terminal=false")
     normalized = _normalize_categories(categories)
     if normalized:
         lines.append(f"Categories={normalized}")
@@ -608,13 +625,18 @@ def delete_desktop_entry(filename: str) -> None:
 
 def create_desktop_entry(
     name: str,
-    exec_path: str,
+    exec_path: str = "",
     icon_path: str = "",
     categories: str = DEFAULT_CATEGORIES,
     overwrite: bool = False,
     previous_filename: str | None = None,
+    command: str = "",
+    working_dir: str = "",
 ) -> Path:
     """Write a .desktop launcher under APPLICATIONS_DIR and return its path.
+
+    Pass ``command`` to create a launcher that runs a command line instead of a
+    lone executable. ``working_dir`` sets the ``Path=`` (start folder) key.
 
     When ``previous_filename`` is given (editing), the old file is removed if the
     generated name changed, and its registry entry is replaced.
@@ -623,12 +645,16 @@ def create_desktop_entry(
     if not name:
         raise ValueError("El nombre no puede estar vacío")
 
+    command = command.strip()
     exec_path = os.path.expanduser(exec_path.strip())
-    if not exec_path:
+    working_dir = os.path.expanduser(working_dir.strip())
+    if command:
+        exec_path = ""
+    elif not exec_path:
         raise ValueError("La ruta del ejecutable no puede estar vacía")
 
     icon_path = os.path.expanduser(icon_path.strip())
-    if not icon_path:
+    if not icon_path and exec_path:
         icon_path = _detect_icon(exec_path)
     if not icon_path:
         icon_path = GENERIC_ICON
@@ -639,7 +665,12 @@ def create_desktop_entry(
     if dest.exists() and not is_same_file and not overwrite:
         raise FileExistsError(dest)
 
-    dest.write_text(build_desktop_entry(name, exec_path, icon_path, categories), encoding="utf-8")
+    dest.write_text(
+        build_desktop_entry(
+            name, exec_path, icon_path, categories, working_dir=working_dir, command=command
+        ),
+        encoding="utf-8",
+    )
     os.chmod(dest, 0o644)
     refresh_desktop_database()
 
@@ -653,7 +684,9 @@ def create_desktop_entry(
     existing = registry.get(dest.name, {})
     registry[dest.name] = {
         "name": name,
-        "exec": exec_path,
+        "exec": exec_path or command,
+        "command": command,
+        "working_dir": working_dir,
         "icon": icon_path,
         "categories": _normalize_categories(categories),
         "created": existing.get("created", datetime.now().isoformat(timespec="seconds")),
@@ -727,7 +760,7 @@ class HelpDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Instrucciones")
         self.setWindowIcon(_logo_icon())
-        self.setFixedSize(390, 260)
+        self.setFixedSize(390, 300)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         layout = QVBoxLayout(self)
@@ -739,10 +772,12 @@ class HelpDialog(QDialog):
 
         instructions = (
             "1. Usa <b>Archivo &rarr; Nuevo acceso directo...</b> para registrar "
-            "una aplicación en el menú.<br>"
-            "2. Usa <b>Ver &rarr; Alternar modo oscuro/claro</b> para cambiar el tema.<br>"
-            "3. Consulta <b>Ayuda &rarr; Acerca de...</b> para ver la versión.<br>"
-            "4. Usa <b>Archivo &rarr; Salir</b> para cerrar la aplicación."
+            "una aplicación o un comando en el menú.<br>"
+            "2. Elige el <b>Tipo</b> (Ejecutable o Comando) y, si lo necesitas, "
+            "indica la <b>Carpeta de inicio</b>.<br>"
+            "3. Usa <b>Ver &rarr; Alternar modo oscuro/claro</b> para cambiar el tema.<br>"
+            "4. Consulta <b>Ayuda &rarr; Acerca de...</b> para ver la versión.<br>"
+            "5. Usa <b>Archivo &rarr; Salir</b> para cerrar la aplicación."
         )
         text_label = QLabel(instructions)
         text_label.setFont(QFont("Arial", 9))
@@ -788,9 +823,28 @@ class LauncherDialog(QDialog):
         self.name_edit.setPlaceholderText("Mi Editor")
         form.addRow("Nombre del programa:", self.name_edit)
 
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Ejecutable", "Comando"])
+        self.mode_combo.currentIndexChanged.connect(self._update_mode)
+        form.addRow("Tipo:", self.mode_combo)
+
+        self.exec_label = QLabel("Ejecutable:")
         self.exec_edit = QLineEdit()
         self.exec_edit.setPlaceholderText("/home/usuario/app/app")
-        form.addRow("Ejecutable:", self._with_browse(self.exec_edit, self._browse_exec))
+        self.exec_row = self._with_browse(self.exec_edit, self._browse_exec)
+        form.addRow(self.exec_label, self.exec_row)
+
+        self.command_label = QLabel("Comando:")
+        self.command_edit = QLineEdit()
+        self.command_edit.setPlaceholderText('bash -c "..."')
+        form.addRow(self.command_label, self.command_edit)
+
+        self.working_dir_edit = QLineEdit()
+        self.working_dir_edit.setPlaceholderText("(opcional)")
+        form.addRow(
+            "Carpeta de inicio:",
+            self._with_browse(self.working_dir_edit, self._browse_working_dir),
+        )
 
         self.icon_edit = QLineEdit()
         self.icon_edit.setPlaceholderText("(opcional)")
@@ -813,15 +867,31 @@ class LauncherDialog(QDialog):
         buttons.addWidget(save_btn)
         layout.addLayout(buttons)
 
+        self._update_mode()
         if editing:
             self._apply_info(info)
 
         if dark_mode:
             self.setStyleSheet(DARK_STYLE)
 
+    def _update_mode(self) -> None:
+        command_mode = self.mode_combo.currentIndex() == 1
+        self.exec_label.setVisible(not command_mode)
+        self.exec_row.setVisible(not command_mode)
+        self.command_label.setVisible(command_mode)
+        self.command_edit.setVisible(command_mode)
+
     def _apply_info(self, info: dict) -> None:
         self.name_edit.setText(info.get("name", ""))
-        self.exec_edit.setText(info.get("exec", ""))
+        self.working_dir_edit.setText(info.get("working_dir", ""))
+        command = info.get("command", "")
+        if command:
+            self.mode_combo.setCurrentIndex(1)
+            self.command_edit.setText(command)
+        else:
+            self.mode_combo.setCurrentIndex(0)
+            self.exec_edit.setText(info.get("exec", ""))
+        self._update_mode()
         self.icon_edit.setText(info.get("icon", ""))
         selected = {item for item in info.get("categories", "").split(";") if item}
         for category, check in self.category_checks.items():
@@ -857,6 +927,11 @@ class LauncherDialog(QDialog):
         if path:
             self.exec_edit.setText(path)
             self._apply_detected_fields(path)
+
+    def _browse_working_dir(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Selecciona la carpeta de inicio")
+        if path:
+            self.working_dir_edit.setText(path)
 
     def _apply_detected_fields(self, exec_path: str) -> None:
         name = self.name_edit.text().strip()
@@ -895,13 +970,19 @@ class LauncherDialog(QDialog):
 
     def _create(self) -> None:
         name = self.name_edit.text().strip()
+        command_mode = self.mode_combo.currentIndex() == 1
+        command = self.command_edit.text().strip()
         exec_path = self.exec_edit.text().strip()
+        working_dir = self.working_dir_edit.text().strip()
 
-        if not exec_path:
+        if command_mode and not command:
+            QMessageBox.warning(self, "Datos incompletos", "Indica el comando.")
+            return
+        if not command_mode and not exec_path:
             QMessageBox.warning(self, "Datos incompletos", "Indica la ruta del ejecutable.")
             return
 
-        if not name:
+        if not name and not command_mode:
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
                 name = _detect_name(exec_path)
@@ -915,11 +996,22 @@ class LauncherDialog(QDialog):
             QMessageBox.warning(self, "Datos incompletos", "El nombre no puede estar vacío.")
             return
 
-        if not os.path.isfile(os.path.expanduser(exec_path)):
+        if not command_mode and not os.path.isfile(os.path.expanduser(exec_path)):
             confirm = QMessageBox.question(
                 self,
                 "Ejecutable no encontrado",
                 f"El archivo '{exec_path}' no existe.\n"
+                "¿Quieres crear el acceso directo igualmente?",
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+
+        working_dir_expanded = os.path.expanduser(working_dir) if working_dir else ""
+        if working_dir_expanded and not os.path.isdir(working_dir_expanded):
+            confirm = QMessageBox.question(
+                self,
+                "Carpeta no encontrada",
+                f"La carpeta '{working_dir}' no existe.\n"
                 "¿Quieres crear el acceso directo igualmente?",
             )
             if confirm != QMessageBox.StandardButton.Yes:
@@ -939,7 +1031,7 @@ class LauncherDialog(QDialog):
             overwrite = True
 
         icon_path = self.icon_edit.text().strip()
-        if not icon_path:
+        if not icon_path and not command_mode:
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
                 icon_path = _detect_icon(exec_path)
@@ -951,11 +1043,13 @@ class LauncherDialog(QDialog):
         try:
             saved = create_desktop_entry(
                 name,
-                exec_path,
+                "" if command_mode else exec_path,
                 icon_path,
                 self._selected_categories(),
                 overwrite=overwrite,
                 previous_filename=self.filename,
+                command=command if command_mode else "",
+                working_dir=working_dir,
             )
         except (ValueError, OSError) as error:
             QMessageBox.critical(self, "Error", f"No se pudo guardar el acceso directo:\n{error}")
