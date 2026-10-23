@@ -331,6 +331,87 @@ def test_delete_desktop_entry(tmp_path, monkeypatch):
     assert main.load_registry() == {}
 
 
+def test_menu_has_import_and_export(qapp):
+    texts = _action_texts(MainWindow(), 0)
+    assert "Exportar accesos..." in texts
+    assert "Importar accesos..." in texts
+
+
+def test_export_and_import_round_trip(tmp_path, monkeypatch):
+    apps = tmp_path / "apps"
+    apps.mkdir()
+    monkeypatch.setattr(main, "APPLICATIONS_DIR", apps)
+    monkeypatch.setattr(main, "refresh_desktop_database", lambda: None)
+    main.create_desktop_entry("Mi Editor", "/usr/bin/editor", categories="Development;")
+    main.create_desktop_entry(
+        "Consola",
+        command="bash -c 'echo hola'",
+        working_dir=str(tmp_path),
+        categories="",
+    )
+
+    export = tmp_path / "accesos.xml"
+    assert main.export_registry_xml(export) == 2
+
+    for filename in list(main.load_registry()):
+        main.delete_desktop_entry(filename)
+    assert main.load_registry() == {}
+
+    assert main.import_registry_xml(export) == (2, 0)
+    registry = main.load_registry()
+    assert registry["mi-editor.desktop"]["exec"] == "/usr/bin/editor"
+    assert registry["consola.desktop"]["command"] == "bash -c 'echo hola'"
+    assert registry["consola.desktop"]["working_dir"] == str(tmp_path)
+    assert f"Path={tmp_path}\n" in (apps / "consola.desktop").read_text(encoding="utf-8")
+
+
+def test_import_skips_existing_when_not_overwriting(tmp_path, monkeypatch):
+    apps = tmp_path / "apps"
+    apps.mkdir()
+    monkeypatch.setattr(main, "APPLICATIONS_DIR", apps)
+    monkeypatch.setattr(main, "refresh_desktop_database", lambda: None)
+    main.create_desktop_entry("Consola", command="echo nuevo")
+    export = tmp_path / "accesos.xml"
+    main.export_registry_xml(export)
+
+    main.create_desktop_entry("Consola", command="echo viejo", overwrite=True)
+    assert main.import_registry_xml(export, overwrite=False) == (0, 1)
+    assert "Exec=echo viejo\n" in (apps / "consola.desktop").read_text(encoding="utf-8")
+
+
+def test_export_empty_registry(tmp_path):
+    export = tmp_path / "vacio.xml"
+    assert main.export_registry_xml(export) == 0
+    assert main.read_export_xml(export) == []
+
+
+def test_read_export_xml_rejects_foreign_file(tmp_path):
+    path = tmp_path / "otro.xml"
+    path.write_text("<root/>", encoding="utf-8")
+    with pytest.raises(ValueError):
+        main.read_export_xml(path)
+
+
+def test_read_export_xml_validates_entries(tmp_path):
+    no_name = tmp_path / "sin-nombre.xml"
+    no_name.write_text("<dotdesktop><launcher><exec>/bin/x</exec></launcher></dotdesktop>")
+    with pytest.raises(ValueError):
+        main.read_export_xml(no_name)
+
+    no_source = tmp_path / "sin-origen.xml"
+    no_source.write_text("<dotdesktop><launcher><name>X</name></launcher></dotdesktop>")
+    with pytest.raises(ValueError):
+        main.read_export_xml(no_source)
+
+    multiline = tmp_path / "multilinea.xml"
+    multiline.write_text(
+        "<dotdesktop><launcher><name>X</name><command>echo a\necho b</command>"
+        "</launcher></dotdesktop>"
+    )
+    with pytest.raises(ValueError):
+        main.read_export_xml(multiline)
+
+
 def test_main_window_shows_cards(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(main, "APPLICATIONS_DIR", tmp_path)
     monkeypatch.setattr(main, "refresh_desktop_database", lambda: None)

@@ -31,6 +31,7 @@ Idea y programación: **@Edfasano70**
 - Registra los accesos creados y los muestra como tarjetas en la pantalla principal.
 - Permite editar los accesos creados (renombra el `.desktop` si cambia el nombre).
 - Permite eliminar los accesos creados (borra el `.desktop` y su registro).
+- Exporta e importa los accesos creados mediante un archivo XML.
 - Tema claro/oscuro y geometría de ventana persistentes.
 
 ## Requisitos
@@ -75,6 +76,29 @@ Ejemplo de acceso por comando: **Tipo** `Comando`, **Comando**
 `bash -c "date +%F"` y **Carpeta de inicio** `/home/usuario`.
 
 El acceso aparece listado como tarjeta y se puede **Editar** o **Eliminar** con sus botones.
+
+### Exportar e importar
+
+Usa **Archivo → Exportar accesos...** para guardar todos los accesos creados en un
+archivo XML, e **Archivo → Importar accesos...** para restaurarlos. Si ya existe un
+acceso con el mismo nombre, se pregunta si se quiere sobrescribir; los demás se
+importan igualmente.
+
+El XML generado tiene este formato:
+
+```xml
+<?xml version='1.0' encoding='utf-8'?>
+<dotdesktop version="1">
+  <launcher>
+    <name>Consola</name>
+    <exec></exec>
+    <command>bash -c "date +%F"</command>
+    <working_dir>/home/usuario</working_dir>
+    <icon></icon>
+    <categories>Utility;</categories>
+  </launcher>
+</dotdesktop>
+```
 
 ## Estructura del proyecto
 

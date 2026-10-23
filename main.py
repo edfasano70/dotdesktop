@@ -612,6 +612,72 @@ def save_registry(registry: dict[str, dict]) -> None:
     )
 
 
+EXPORT_VERSION = "1"
+_EXPORT_FIELDS = ("name", "exec", "command", "working_dir", "icon", "categories")
+
+
+def export_registry_xml(dest: Path) -> int:
+    """Write the created launchers to an XML file and return how many were exported."""
+    registry = load_registry()
+    root = ET.Element("dotdesktop", {"version": EXPORT_VERSION})
+    for info in sorted(registry.values(), key=lambda item: item.get("name", "").lower()):
+        node = ET.SubElement(root, "launcher")
+        for field in _EXPORT_FIELDS:
+            ET.SubElement(node, field).text = str(info.get(field, ""))
+    tree = ET.ElementTree(root)
+    ET.indent(tree, space="  ")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tree.write(dest, encoding="utf-8", xml_declaration=True)
+    return len(registry)
+
+
+def read_export_xml(path: Path) -> list[dict]:
+    """Read an XML export and return the launcher definitions it contains."""
+    root = ET.parse(path).getroot()
+    if root.tag != "dotdesktop":
+        raise ValueError("El archivo XML no es una exportación de dotDesktop")
+
+    launchers: list[dict] = []
+    for index, node in enumerate(root.findall("launcher"), start=1):
+        info = {field: (node.findtext(field) or "").strip() for field in _EXPORT_FIELDS}
+        if not info["name"]:
+            raise ValueError(f"El acceso {index} no tiene nombre")
+        if not info["exec"] and not info["command"]:
+            raise ValueError(f"El acceso '{info['name']}' no tiene ejecutable ni comando")
+        if "\n" in info["command"] or "\r" in info["command"]:
+            raise ValueError(f"El comando de '{info['name']}' no puede tener saltos de línea")
+        launchers.append(info)
+    return launchers
+
+
+def import_registry_xml(path: Path, overwrite: bool = True) -> tuple[int, int]:
+    """Create launchers from an XML export, returning (imported, skipped)."""
+    imported = 0
+    skipped = 0
+    for info in read_export_xml(path):
+        dest = APPLICATIONS_DIR / f"{_slugify(info['name'])}.desktop"
+        if dest.exists() and not overwrite:
+            skipped += 1
+            continue
+
+        icon = info["icon"]
+        expanded_icon = os.path.expanduser(icon)
+        if icon and os.path.isabs(expanded_icon) and not Path(expanded_icon).exists():
+            icon = ""
+
+        create_desktop_entry(
+            info["name"],
+            info["exec"],
+            icon,
+            info["categories"],
+            overwrite=True,
+            command=info["command"],
+            working_dir=info["working_dir"],
+        )
+        imported += 1
+    return imported, skipped
+
+
 def delete_desktop_entry(filename: str) -> None:
     """Remove a launcher file and its registry entry."""
     path = APPLICATIONS_DIR / filename
@@ -760,7 +826,7 @@ class HelpDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Instrucciones")
         self.setWindowIcon(_logo_icon())
-        self.setFixedSize(390, 300)
+        self.setFixedSize(390, 320)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         layout = QVBoxLayout(self)
@@ -776,8 +842,10 @@ class HelpDialog(QDialog):
             "2. Elige el <b>Tipo</b> (Ejecutable o Comando) y, si lo necesitas, "
             "indica la <b>Carpeta de inicio</b>.<br>"
             "3. Usa <b>Ver &rarr; Alternar modo oscuro/claro</b> para cambiar el tema.<br>"
-            "4. Consulta <b>Ayuda &rarr; Acerca de...</b> para ver la versión.<br>"
-            "5. Usa <b>Archivo &rarr; Salir</b> para cerrar la aplicación."
+            "4. Usa <b>Archivo &rarr; Exportar/Importar accesos...</b> para "
+            "respaldarlos o restaurarlos en XML.<br>"
+            "5. Consulta <b>Ayuda &rarr; Acerca de...</b> para ver la versión.<br>"
+            "6. Usa <b>Archivo &rarr; Salir</b> para cerrar la aplicación."
         )
         text_label = QLabel(instructions)
         text_label.setFont(QFont("Arial", 9))
@@ -1137,6 +1205,13 @@ class MainWindow(QMainWindow):
         new_action.triggered.connect(self.show_launcher)
         file_menu.addAction(new_action)
         file_menu.addSeparator()
+        export_action = QAction(_icon("file_upload"), "Exportar accesos...", self)
+        export_action.triggered.connect(self.export_launchers)
+        file_menu.addAction(export_action)
+        import_action = QAction(_icon("file_download"), "Importar accesos...", self)
+        import_action.triggered.connect(self.import_launchers)
+        file_menu.addAction(import_action)
+        file_menu.addSeparator()
         exit_action = QAction(_icon("exit_to_app"), "Salir", self)
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
@@ -1231,6 +1306,84 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"No se pudo eliminar:\n{error}")
             return
         self._refresh_cards()
+
+    def export_launchers(self) -> None:
+        if not load_registry():
+            QMessageBox.information(self, "Sin accesos", "No hay accesos directos para exportar.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exportar accesos directos",
+            str(Path.home() / "dotdesktop-accesos.xml"),
+            "Archivos XML (*.xml)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".xml"):
+            path += ".xml"
+
+        try:
+            count = export_registry_xml(Path(path))
+        except OSError as error:
+            QMessageBox.critical(self, "Error", f"No se pudo exportar:\n{error}")
+            return
+
+        self.statusBar().showMessage(f"{count} accesos exportados")
+        QMessageBox.information(
+            self,
+            "Exportación completa",
+            f"Se exportaron {count} accesos directos a:\n{path}",
+        )
+
+    def import_launchers(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Importar accesos directos",
+            "",
+            "Archivos XML (*.xml)",
+        )
+        if not path:
+            return
+
+        try:
+            entries = read_export_xml(Path(path))
+        except (OSError, ValueError, ET.ParseError) as error:
+            QMessageBox.critical(self, "Error", f"No se pudo leer el archivo:\n{error}")
+            return
+        if not entries:
+            QMessageBox.information(self, "Sin accesos", "El archivo no contiene accesos directos.")
+            return
+
+        collisions = {
+            info["name"]
+            for info in entries
+            if (APPLICATIONS_DIR / f"{_slugify(info['name'])}.desktop").exists()
+        }
+        overwrite = True
+        if collisions:
+            confirm = QMessageBox.question(
+                self,
+                "Accesos existentes",
+                f"{len(collisions)} acceso(s) ya existen.\n¿Quieres sobrescribirlos?",
+            )
+            overwrite = confirm == QMessageBox.StandardButton.Yes
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            imported, skipped = import_registry_xml(Path(path), overwrite=overwrite)
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(self, "Error", f"No se pudieron importar los accesos:\n{error}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self._refresh_cards()
+        self.statusBar().showMessage(f"{imported} accesos importados")
+        message = f"Se importaron {imported} accesos directos."
+        if skipped:
+            message += f"\nSe omitieron {skipped} que ya existían."
+        QMessageBox.information(self, "Importación completa", message)
 
     def _apply_dark_mode(self, enabled: bool) -> None:
         self.dark_mode = enabled
